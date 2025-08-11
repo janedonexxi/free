@@ -1,0 +1,113 @@
+name: noVNC desktop on hosted runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # GitHub-hosted runner üst sınırı (6 saat)
+
+    permissions:
+      contents: read
+
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      DISPLAY: :1
+      VNC_GEOMETRY: 1920x1080
+      VNC_DEPTH: 24
+      NOVNC_PORT: 6080
+
+    steps:
+      - name: Checkout (optional)
+        uses: actions/checkout@v4
+
+      - name: Install XFCE, TigerVNC, noVNC, websockify, cloudflared
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xfce4 xfce4-goodies tigervnc-standalone-server novnc websockify
+          # cloudflared kur
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o /tmp/cloudflared.deb
+          sudo dpkg -i /tmp/cloudflared.deb || sudo apt-get -f install -y
+
+      - name: Configure VNC (xstartup + password)
+        run: |
+          mkdir -p ~/.vnc
+          cat > ~/.vnc/xstartup << 'EOF'
+          #!/bin/sh
+          unset SESSION_MANAGER
+          unset DBUS_SESSION_BUS_ADDRESS
+          exec startxfce4
+          EOF
+          chmod +x ~/.vnc/xstartup
+
+          # VNC parolasını repo Secret'ından al: VNC_PASSWORD
+          if [ -z "${{ secrets.VNC_PASSWORD }}" ]; then
+            echo "VNC_PASSWORD secret'ını tanımlayın." >&2
+            exit 1
+          fi
+          # Parolayı passwd dosyasına yaz
+          echo "${{ secrets.VNC_PASSWORD }}" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
+
+      - name: Start TigerVNC server (:1)
+        run: |
+          vncserver ${DISPLAY} -geometry ${VNC_GEOMETRY} -depth ${VNC_DEPTH} -localhost yes
+
+      - name: Start noVNC (websockify -> 5901)
+        run: |
+          # Arka planda noVNC + websockify
+          websockify --web=/usr/share/novnc/ ${NOVNC_PORT} localhost:5901 > novnc.log 2>&1 &
+          echo $! > novnc.pid
+
+      - name: Start Cloudflare Tunnel to expose noVNC
+        id: tunnel
+        run: |
+          # Random trycloudflare.com URL'i üret
+          cloudflared tunnel --url http://localhost:${NOVNC_PORT} --no-autoupdate > cfd.log 2>&1 &
+          echo $! > cfd.pid
+
+          # URL çıkana kadar log'u bekle ve yakala
+          for i in $(seq 1 60); do
+            URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' cfd.log | tail -n1 || true)
+            if [ -n "$URL" ]; then
+              echo "URL=$URL" >> $GITHUB_OUTPUT
+              break
+            fi
+            sleep 2
+          done
+
+          if [ -z "$URL" ]; then
+            echo "Cloudflared URL bulunamadı" >&2
+            echo "---- cloudflared log ----"; tail -n +1 cfd.log || true
+            exit 1
+          fi
+
+      - name: Show connect instructions
+        run: |
+          {
+            echo "## ✅ noVNC hazır"
+            echo ""
+            echo "**Bağlantı URL’i:** ${{ steps.tunnel.outputs.URL }}/vnc.html"
+            echo ""
+            echo "- VNC host: **localhost** (otomatik gelir)"
+            echo "- VNC port: **5901** (websockify köprüler)"
+            echo "- Parola: **repo Secret \`VNC_PASSWORD\`**"
+            echo ""
+            echo "> Oturum bu job bitene kadar açık kalır (en fazla 6 saat)."
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Keep session alive (until workflow is manually stopped)
+        run: |
+          echo "noVNC: ${{ steps.tunnel.outputs.URL }}/vnc.html"
+          echo "CTRL+C yok; bu step workflow sona erene kadar bekler."
+          # Sonsuz bekleme (6 saat limitine kadar)
+          sleep 21600
+
+      - name: Cleanup
+        if: always()
+        run: |
+          set +e
+          vncserver -kill ${DISPLAY} || true
+          [ -f novnc.pid ] && kill "$(cat novnc.pid)" || true
+          [ -f cfd.pid ] && kill "$(cat cfd.pid)" || true
