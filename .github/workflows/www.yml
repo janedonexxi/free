@@ -1,48 +1,59 @@
-name: Windows Desktop (noVNC)
+name: macOS Desktop (noVNC)
 
 on:
   workflow_dispatch:
 
 jobs:
   desktop:
-    runs-on: windows-latest
+    runs-on: macos-latest
     timeout-minutes: 360  # max 6 saat
 
     steps:
-      - name: Install Chocolatey and noVNC dependencies
+      - name: Install Homebrew packages
         run: |
-          Set-ExecutionPolicy Bypass -Scope Process -Force
-          iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
-          choco install tigervnc -y
-          choco install novnc -y
-          choco install python -y
-          pip install websockify
-          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -o cloudflared.exe
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          brew install tigervnc
+          brew install novnc
+          brew install python
+          pip3 install websockify
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.tgz -o cloudflared.tgz
+          tar -xvzf cloudflared.tgz
 
-      - name: Configure VNC Server
+      - name: Configure VNC
         run: |
-          mkdir $env:USERPROFILE\.vnc
-          $passwd = "test123"
-          echo $passwd | vncpasswd -f > $env:USERPROFILE\.vnc\passwd
-          icacls $env:USERPROFILE\.vnc\passwd /inheritance:r /grant:r "$env:USERNAME":R
+          mkdir -p ~/.vnc
+          echo "test123" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
+          cat > ~/.vnc/xstartup <<'EOF'
+          #!/bin/sh
+          /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal &
+          EOF
+          chmod +x ~/.vnc/xstartup
 
       - name: Start VNC and noVNC
         run: |
-          start-process vncserver -ArgumentList ":1 -geometry 1920x1080 -depth 24 -localhost"
-          start-process websockify -ArgumentList "6080 localhost:5901"
+          vncserver :1 -geometry 1920x1080 -depth 24 -localhost yes
+          websockify --web=$(brew --prefix)/share/novnc/ 6080 localhost:5901 &
 
       - name: Start Cloudflare Tunnel
+        id: tunnel
         run: |
-          start-process .\cloudflared.exe -ArgumentList "tunnel --url http://localhost:6080 --no-autoupdate"
-          Start-Sleep -Seconds 10
-          Get-Content cloudflared.log
+          ./cloudflared tunnel --url http://localhost:6080 --no-autoupdate > cfd.log 2>&1 &
+          for i in $(seq 1 30); do
+            URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' cfd.log | tail -n1 || true)
+            if [ -n "$URL" ]; then
+              echo "url=$URL" >> $GITHUB_OUTPUT
+              break
+            fi
+            sleep 2
+          done
 
       - name: Show Connection Info
         run: |
-          echo "## Web Windows Desktop (noVNC)" >> $env:GITHUB_STEP_SUMMARY
-          echo "URL: (Cloudflare logundan alın)" >> $env:GITHUB_STEP_SUMMARY
-          echo "Password: test123" >> $env:GITHUB_STEP_SUMMARY
-          echo "Not: Bu oturum workflow bitene kadar (max 6 saat) açık kalır." >> $env:GITHUB_STEP_SUMMARY
+          echo "## Web macOS Desktop (noVNC)" >> $GITHUB_STEP_SUMMARY
+          echo "URL: ${{ steps.tunnel.outputs.url }}/vnc.html" >> $GITHUB_STEP_SUMMARY
+          echo "Password: test123" >> $GITHUB_STEP_SUMMARY
+          echo "Not: Bu oturum workflow bitene kadar (max 6 saat) açık kalır." >> $GITHUB_STEP_SUMMARY
 
       - name: Keep session alive
-        run: Start-Sleep -Seconds 21600
+        run: sleep 21600
