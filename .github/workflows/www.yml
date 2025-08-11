@@ -1,4 +1,4 @@
-name: Windows Desktop (RDP)
+name: Windows Desktop (noVNC)
 
 on:
   workflow_dispatch:
@@ -9,26 +9,39 @@ jobs:
     timeout-minutes: 360  # max 6 saat
 
     steps:
-      - name: Install Chocolatey and OpenSSH Server
+      - name: Install Chocolatey and noVNC dependencies
         run: |
           Set-ExecutionPolicy Bypass -Scope Process -Force
           iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
-          choco install openssh -y
-          # Enable and start SSH Server (for RDP-like access, you'd need a jump to GUI environment)
-          Start-Service sshd
-          Set-Service -Name sshd -StartupType 'Automatic'
+          choco install tigervnc -y
+          choco install novnc -y
+          choco install python -y
+          pip install websockify
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -o cloudflared.exe
 
-      - name: Enable RDP
+      - name: Configure VNC Server
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          mkdir $env:USERPROFILE\.vnc
+          $passwd = "test123"
+          echo $passwd | vncpasswd -f > $env:USERPROFILE\.vnc\passwd
+          icacls $env:USERPROFILE\.vnc\passwd /inheritance:r /grant:r "$env:USERNAME":R
+
+      - name: Start VNC and noVNC
+        run: |
+          start-process vncserver -ArgumentList ":1 -geometry 1920x1080 -depth 24 -localhost"
+          start-process websockify -ArgumentList "6080 localhost:5901"
+
+      - name: Start Cloudflare Tunnel
+        run: |
+          start-process .\cloudflared.exe -ArgumentList "tunnel --url http://localhost:6080 --no-autoupdate"
+          Start-Sleep -Seconds 10
+          Get-Content cloudflared.log
 
       - name: Show Connection Info
         run: |
-          $ip = (Invoke-RestMethod -Uri "https://api.ipify.org?format=json").ip
-          echo "## Web Windows Desktop" >> $env:GITHUB_STEP_SUMMARY
-          echo "Public IP: $ip" >> $env:GITHUB_STEP_SUMMARY
-          echo "RDP Port: 3389" >> $env:GITHUB_STEP_SUMMARY
+          echo "## Web Windows Desktop (noVNC)" >> $env:GITHUB_STEP_SUMMARY
+          echo "URL: (Cloudflare logundan alın)" >> $env:GITHUB_STEP_SUMMARY
+          echo "Password: test123" >> $env:GITHUB_STEP_SUMMARY
           echo "Not: Bu oturum workflow bitene kadar (max 6 saat) açık kalır." >> $env:GITHUB_STEP_SUMMARY
 
       - name: Keep session alive
