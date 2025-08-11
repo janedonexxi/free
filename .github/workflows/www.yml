@@ -1,0 +1,35 @@
+name: Windows Desktop (RDP)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  desktop:
+    runs-on: windows-latest
+    timeout-minutes: 360  # max 6 saat
+
+    steps:
+      - name: Install Chocolatey and OpenSSH Server
+        run: |
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
+          choco install openssh -y
+          # Enable and start SSH Server (for RDP-like access, you'd need a jump to GUI environment)
+          Start-Service sshd
+          Set-Service -Name sshd -StartupType 'Automatic'
+
+      - name: Enable RDP
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+      - name: Show Connection Info
+        run: |
+          $ip = (Invoke-RestMethod -Uri "https://api.ipify.org?format=json").ip
+          echo "## Web Windows Desktop" >> $env:GITHUB_STEP_SUMMARY
+          echo "Public IP: $ip" >> $env:GITHUB_STEP_SUMMARY
+          echo "RDP Port: 3389" >> $env:GITHUB_STEP_SUMMARY
+          echo "Not: Bu oturum workflow bitene kadar (max 6 saat) açık kalır." >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Keep session alive
+        run: Start-Sleep -Seconds 21600
