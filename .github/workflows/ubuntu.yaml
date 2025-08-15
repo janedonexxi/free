@@ -1,0 +1,63 @@
+name: Ubuntu XFCE Desktop (noVNC)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # max 6 saat
+
+    env:
+      DISPLAY: :1
+      NOVNC_PORT: 6080
+      VNC_PASSWORD: test123   # test için, güçlü parola önerilir
+
+    steps:
+      - name: Install XFCE, TigerVNC, noVNC, websockify, cloudflared
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xfce4 xfce4-goodies tigervnc-standalone-server novnc websockify
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o /tmp/cloudflared.deb
+          sudo dpkg -i /tmp/cloudflared.deb || sudo apt-get -f install -y
+
+      - name: Configure VNC
+        run: |
+          mkdir -p ~/.vnc
+          echo "${VNC_PASSWORD}" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
+          cat > ~/.vnc/xstartup <<'EOF'
+          #!/bin/sh
+          unset SESSION_MANAGER
+          unset DBUS_SESSION_BUS_ADDRESS
+          exec startxfce4
+          EOF
+          chmod +x ~/.vnc/xstartup
+
+      - name: Start VNC and noVNC
+        run: |
+          vncserver ${DISPLAY} -geometry 1920x1080 -depth 24 -localhost yes
+          websockify --web=/usr/share/novnc/ ${NOVNC_PORT} localhost:5901 > novnc.log 2>&1 &
+
+      - name: Start Cloudflare Tunnel
+        id: tunnel
+        run: |
+          cloudflared tunnel --url http://localhost:${NOVNC_PORT} --no-autoupdate > cfd.log 2>&1 &
+          for i in {1..30}; do
+            URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' cfd.log | tail -n1 || true)
+            if [ -n "$URL" ]; then
+              echo "url=$URL" >> $GITHUB_OUTPUT
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Show Connection Info
+        run: |
+          echo "## Web Ubuntu Desktop" >> $GITHUB_STEP_SUMMARY
+          echo "URL: ${{ steps.tunnel.outputs.url }}/vnc.html" >> $GITHUB_STEP_SUMMARY
+          echo "Password: ${VNC_PASSWORD}" >> $GITHUB_STEP_SUMMARY
+          echo "Not: Bu oturum workflow bitene kadar (max 6 saat) açık kalır." >> $GITHUB_STEP_SUMMARY
+
+      - name: Keep session alive
+        run: sleep 21600
